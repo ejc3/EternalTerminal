@@ -1,0 +1,88 @@
+# Builds Eternal Terminal binaries for the ejc3 dev boxes.
+#
+# Why this exists: the dev servers used to compile ET from source on every rebuild,
+# which took ~5 minutes of instance time and could fail mid-bootstrap. Instead we build
+# once here and the boxes download a prebuilt tarball.
+#
+# Runner images are pinned to ubuntu-24.04 because the dev boxes run Ubuntu noble with
+# glibc 2.39 -- building on a newer image would produce binaries they cannot load.
+name: build-binaries
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [vendor/7.x]
+  # Weekly rebuild so base-image security updates land in the binaries we ship.
+  schedule:
+    - cron: "0 6 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          submodules: recursive
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake libboost-dev \
+            libsodium-dev libprotobuf-dev protobuf-compiler \
+            libutempter-dev zlib1g-dev libcurl4-openssl-dev
+
+      - name: Build
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DDISABLE_VCPKG=ON
+          cmake --build build -j"$(nproc)"
+
+      # Fail the build rather than ship a binary that cannot even report its version.
+      - name: Smoke test
+        run: |
+          ./build/etserver --version
+          ./build/et --version
+          ./build/etserver --version | grep -q "7\." || { echo "unexpected version"; exit 1; }
+
+      - name: Package
+        run: |
+          tar czf "et-${{ matrix.arch }}.tar.gz" -C build et etserver etterminal
+          sha256sum "et-${{ matrix.arch }}.tar.gz" > "et-${{ matrix.arch }}.tar.gz.sha256"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: et-${{ matrix.arch }}
+          path: et-${{ matrix.arch }}.tar.gz*
+
+  release:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          merge-multiple: true
+          path: dist
+
+      # A rolling tag: the dev boxes always fetch the same URL and compare checksums to
+      # decide whether anything actually changed.
+      - name: Publish rolling release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view binaries-7.x --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
+            || gh release create binaries-7.x --repo "$GITHUB_REPOSITORY" \
+                 --title "ET 7.x prebuilt binaries" \
+                 --notes "Prebuilt for Ubuntu 24.04 (glibc 2.39). Rebuilt weekly."
+          gh release upload binaries-7.x dist/* --repo "$GITHUB_REPOSITORY" --clobber
