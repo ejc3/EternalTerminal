@@ -56,8 +56,18 @@ jobs:
 
       - name: Package
         run: |
+          # Strip debug symbols: unstripped these are ~100MB for three binaries, which
+          # every dev box would then re-download on the weekly refresh. Strip after the
+          # smoke test so we only ship a binary we already proved runs.
+          ls -l build/et build/etserver build/etterminal
+          strip build/et build/etserver build/etterminal
+          echo "--- after strip ---"
+          ls -l build/et build/etserver build/etterminal
           tar czf "et-${{ matrix.arch }}.tar.gz" -C build et etserver etterminal
+          # Re-verify post-strip: stripping must not break the binary we ship.
+          ./build/etserver --version
           sha256sum "et-${{ matrix.arch }}.tar.gz" > "et-${{ matrix.arch }}.tar.gz.sha256"
+          ls -lh "et-${{ matrix.arch }}.tar.gz"
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
