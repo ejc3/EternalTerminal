@@ -56,23 +56,34 @@ jobs:
 
       - name: Package
         run: |
-          # Strip debug symbols: unstripped these are ~100MB for three binaries, which
-          # every dev box would then re-download on the weekly refresh. Strip after the
-          # smoke test so we only ship a binary we already proved runs.
-          ls -l build/et build/etserver build/etterminal
-          strip build/et build/etserver build/etterminal
-          echo "--- after strip ---"
-          ls -l build/et build/etserver build/etterminal
-          tar czf "et-${{ matrix.arch }}.tar.gz" -C build et etserver etterminal
-          # Re-verify post-strip: stripping must not break the binary we ship.
+          # Split debug info rather than discarding it. The runtime tarball stays small
+          # (~2MB vs ~103MB unstripped) for the weekly refresh, while full symbols ship
+          # as a separate artifact for post-mortem debugging. --add-gnu-debuglink leaves
+          # a pointer in the stripped binary so gdb picks the symbols up automatically
+          # once et.debug sits alongside it (or in /usr/lib/debug).
+          for b in et etserver etterminal; do
+            objcopy --only-keep-debug "build/$b" "build/$b.debug"
+            strip "build/$b"
+            objcopy --add-gnu-debuglink="build/$b.debug" "build/$b"
+          done
+
+          tar czf "et-${{ matrix.arch }}.tar.gz"       -C build et etserver etterminal
+          tar czf "et-${{ matrix.arch }}-debug.tar.gz" -C build et.debug etserver.debug etterminal.debug
+
+          # Re-verify AFTER stripping: a broken strip must fail the build, not ship.
           ./build/etserver --version
-          sha256sum "et-${{ matrix.arch }}.tar.gz" > "et-${{ matrix.arch }}.tar.gz.sha256"
-          ls -lh "et-${{ matrix.arch }}.tar.gz"
+
+          for t in "et-${{ matrix.arch }}.tar.gz" "et-${{ matrix.arch }}-debug.tar.gz"; do
+            sha256sum "$t" > "$t.sha256"
+          done
+          ls -lh et-${{ matrix.arch }}*.tar.gz
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: et-${{ matrix.arch }}
-          path: et-${{ matrix.arch }}.tar.gz*
+          path: |
+            et-${{ matrix.arch }}.tar.gz*
+            et-${{ matrix.arch }}-debug.tar.gz*
 
   release:
     needs: build
